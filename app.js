@@ -2,7 +2,8 @@
  * 주식 AI 상승하락 알리미
  *  - Yahoo Finance 데이터(2년 일봉)로 기술적 지표 계산
  *  - 로지스틱 회귀 모델을 브라우저에서 직접 학습
- *  - 다음 거래일 상승/하락 예측 + 장중 급등락 브라우저 알림
+ *  - 핵심 판단 기준: 수급(거래량 흐름) — OBV, MFI, 상승/하락일 거래량
+ *    "상승은 수급이 따라올 때 붙는다" → 수급 점수가 최종 판단을 좌우
  * ========================================================== */
 
 const $ = (id) => document.getElementById(id);
@@ -71,8 +72,64 @@ function ema(arr, span) {
   return out;
 }
 
-// 각 날짜별 특징 벡터 + 라벨(다음날 상승=1) 데이터셋 생성
-function buildDataset(close, volume) {
+/* ─────────── 수급 지표 ─────────── */
+
+// OBV(On-Balance Volume): 상승일엔 거래량을 더하고 하락일엔 빼는 누적값.
+// 가격보다 먼저 움직이는 "매집/분산"의 흔적을 보여준다.
+function computeOBV(close, volume) {
+  const obv = new Array(close.length).fill(0);
+  for (let i = 1; i < close.length; i++) {
+    if (close[i] > close[i - 1]) obv[i] = obv[i - 1] + volume[i];
+    else if (close[i] < close[i - 1]) obv[i] = obv[i - 1] - volume[i];
+    else obv[i] = obv[i - 1];
+  }
+  return obv;
+}
+
+// MFI(Money Flow Index): 거래량을 반영한 RSI. 50 이상이면 자금 유입 우위.
+function computeMFI(high, low, close, volume) {
+  const period = 14;
+  const mfi = new Array(close.length).fill(null);
+  const tp = close.map((c, i) => (high[i] + low[i] + c) / 3);
+  for (let i = period; i < close.length; i++) {
+    let pos = 0, neg = 0;
+    for (let k = i - period + 1; k <= i; k++) {
+      const mf = tp[k] * volume[k];
+      if (tp[k] > tp[k - 1]) pos += mf;
+      else if (tp[k] < tp[k - 1]) neg += mf;
+    }
+    mfi[i] = 100 - 100 / (1 + pos / (neg || 1e-9));
+  }
+  return mfi;
+}
+
+// 최근 20일 중 상승일 거래량 합 / 하락일 거래량 합
+function upDownVolRatio(close, volume, i, n = 20) {
+  let up = 0, down = 0;
+  for (let k = i - n + 1; k <= i; k++) {
+    if (close[k] > close[k - 1]) up += volume[k];
+    else if (close[k] < close[k - 1]) down += volume[k];
+  }
+  return (up + 1) / (down + 1);
+}
+
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+// 수급 점수 (0~100): OBV 추세 40% + MFI 30% + 상승/하락 거래량비 30%
+function supplyScore(obvSlope, mfi, udRatio) {
+  const obvComp = clamp01(0.5 + obvSlope / 0.3);
+  const mfiComp = clamp01(mfi / 100);
+  const udComp = clamp01(0.5 + Math.log(udRatio) / (2 * Math.log(4)));
+  return {
+    score: Math.round((0.4 * obvComp + 0.3 * mfiComp + 0.3 * udComp) * 100),
+    obvComp, mfiComp, udComp,
+  };
+}
+
+/* ─────────── 데이터셋 생성 ─────────── */
+
+// 각 날짜별 특징 벡터(기술 지표 + 수급 지표) + 라벨(다음날 상승=1)
+function buildDataset(close, volume, high, low) {
   const n = close.length;
   const ret1 = close.map((c, i) => (i > 0 ? c / close[i - 1] - 1 : null));
   const rsi = computeRSI(close);
@@ -80,6 +137,8 @@ function buildDataset(close, volume) {
   const ema26 = ema(close, 26);
   const macd = ema12.map((v, i) => v - ema26[i]);
   const signal = ema(macd, 9);
+  const obv = computeOBV(close, volume);
+  const mfi = computeMFI(high, low, close, volume);
 
   const rows = [];
   for (let i = 60; i < n; i++) {
@@ -93,6 +152,10 @@ function buildDataset(close, volume) {
     for (let k = i - 19; k <= i; k++) { vsum += (ret1[k] - vmean) ** 2; vcnt++; }
     const volatility = Math.sqrt(vsum / vcnt);
 
+    // 수급 지표
+    const obvSlope = volMa20 > 0 ? (obv[i] - obv[i - 20]) / (volMa20 * 20) : 0;
+    const udRatio = upDownVolRatio(close, volume, i);
+
     const feat = [
       ret1[i],
       close[i] / close[i - 5] - 1,
@@ -105,10 +168,13 @@ function buildDataset(close, volume) {
       sd20 > 0 ? (close[i] - (ma20 - 2 * sd20)) / (4 * sd20) - 0.5 : 0,
       volatility,
       volMa20 > 0 ? volume[i] / volMa20 - 1 : 0,
+      obvSlope,
+      ((mfi[i] ?? 50) - 50) / 50,
+      Math.log(udRatio),
     ];
     if (feat.some((v) => v === null || !isFinite(v))) continue;
     const label = i + 1 < n ? (close[i + 1] > close[i] ? 1 : 0) : null;
-    rows.push({ feat, label, idx: i });
+    rows.push({ feat, label, idx: i, obvSlope, mfi: mfi[i] ?? 50, udRatio });
   }
   return rows;
 }
@@ -154,9 +220,29 @@ function trainLogistic(X, y, epochs = 400, lr = 0.05, l2 = 0.001) {
   };
 }
 
-// 전체 파이프라인: 학습 → 백테스트 → 최신 데이터 예측
-function analyze(close, volume) {
-  const rows = buildDataset(close, volume);
+/* ─────────── 종합 판단 ───────────
+ * 원칙: "상승은 수급이 따라올 때 붙는다"
+ *  - 수급 점수 ≥ 60 + 모델 상승 → 상승 (수급 뒷받침)
+ *  - 수급 점수 ≥ 60 + 모델 하락 → 반등 주시 (수급 유입 중)
+ *  - 수급 점수 ≤ 40             → 하락 우려 (수급 이탈) — 모델과 무관
+ *  - 그 외                      → 모델 방향 따르되 수급 중립 표시
+ */
+function makeVerdict(probUp, supply) {
+  const modelUp = probUp >= 0.5;
+  if (supply.score >= 60 && modelUp)
+    return { dir: "up", text: "📈 상승", reason: "수급 유입 + 모델 상승 신호" };
+  if (supply.score >= 60)
+    return { dir: "up", text: "👀 반등 주시", reason: "수급 유입 중, 모델은 하락 신호" };
+  if (supply.score <= 40)
+    return { dir: "down", text: "📉 하락 우려", reason: "수급 이탈 — 상승 신호 신뢰 낮음" };
+  return modelUp
+    ? { dir: "up", text: "🤏 약한 상승", reason: "모델 상승 신호, 수급 중립" }
+    : { dir: "down", text: "📉 하락", reason: "모델 하락 신호, 수급 중립" };
+}
+
+// 전체 파이프라인: 학습 → 백테스트 → 최신 데이터 예측 + 수급 판단
+function analyze(close, volume, high, low) {
+  const rows = buildDataset(close, volume, high, low);
   const labeled = rows.filter((r) => r.label !== null);
   if (labeled.length < 150) throw new Error("데이터가 부족합니다");
 
@@ -180,7 +266,10 @@ function analyze(close, volume) {
   const { X: Xlatest } = standardize([latest], stats);
   const probUp = model.predict(Xlatest[0]);
 
-  return { probUp, accuracy, baseline, samples: labeled.length };
+  const supply = supplyScore(latest.obvSlope, latest.mfi, latest.udRatio);
+  const verdict = makeVerdict(probUp, supply);
+
+  return { probUp, accuracy, baseline, supply, verdict };
 }
 
 /* ─────────── UI: 예측 카드 ─────────── */
@@ -189,6 +278,12 @@ function fmtPrice(p, currency) {
   const digits = p >= 1000 ? 0 : 2;
   return p.toLocaleString("ko-KR", { maximumFractionDigits: digits }) +
     (currency === "KRW" ? "원" : currency === "USD" ? " $" : ` ${currency || ""}`);
+}
+
+function supplyLabel(score) {
+  if (score >= 60) return "💧 수급 유입";
+  if (score <= 40) return "🏃 수급 이탈";
+  return "➖ 수급 중립";
 }
 
 async function renderCard(symbol) {
@@ -207,19 +302,21 @@ async function renderCard(symbol) {
     const result = await fetchChart(symbol, "2y", "1d");
     const meta = result.meta;
     const quote = result.indicators.quote[0];
-    const close = [], volume = [];
+    const close = [], volume = [], high = [], low = [];
     quote.close.forEach((c, i) => {
-      if (c !== null && quote.volume[i] !== null) {
+      if (c !== null && quote.volume[i] !== null &&
+          quote.high[i] !== null && quote.low[i] !== null) {
         close.push(c);
         volume.push(quote.volume[i]);
+        high.push(quote.high[i]);
+        low.push(quote.low[i]);
       }
     });
 
-    const { probUp, accuracy, baseline } = analyze(close, volume);
+    const { probUp, accuracy, supply, verdict } = analyze(close, volume, high, low);
     const price = meta.regularMarketPrice ?? close[close.length - 1];
     const prevClose = meta.chartPreviousClose ?? close[close.length - 2];
     const changePct = ((price - prevClose) / prevClose) * 100;
-    const isUp = probUp >= 0.5;
 
     card.className = "card";
     card.innerHTML = `
@@ -232,13 +329,21 @@ async function renderCard(symbol) {
           ${changePct >= 0 ? "▲" : "▼"} ${Math.abs(changePct).toFixed(2)}%
         </span>
       </div>
-      <div class="pred">
-        <div class="dir ${isUp ? "up" : "down"}">
-          다음 거래일 ${isUp ? "상승 📈" : "하락 📉"} 예측
+      <div class="supply">
+        <div class="supply-head">
+          <span>${supplyLabel(supply.score)}</span>
+          <strong>${supply.score}점</strong>
         </div>
+        <div class="prob-bar supply-bar"><div style="width:${supply.score}%"></div></div>
+        <div class="meta">OBV ${supply.obvComp >= 0.5 ? "매집↑" : "분산↓"} ·
+          MFI ${Math.round(supply.mfiComp * 100)} ·
+          상승일 거래량 ${supply.udComp >= 0.5 ? "우위" : "열세"}</div>
+      </div>
+      <div class="pred">
+        <div class="dir ${verdict.dir}">${verdict.text}</div>
+        <div class="meta reason">${verdict.reason}</div>
         <div class="prob-bar"><div style="width:${(probUp * 100).toFixed(0)}%"></div></div>
-        <div class="meta">상승 확률 ${(probUp * 100).toFixed(1)}% ·
-          백테스트 정확도 ${(accuracy * 100).toFixed(1)}% (기준선 ${(baseline * 100).toFixed(1)}%)</div>
+        <div class="meta">모델 상승확률 ${(probUp * 100).toFixed(0)}% · 정확도 ${(accuracy * 100).toFixed(0)}%</div>
       </div>`;
     card.querySelector(".remove").onclick = () => removeSymbol(symbol);
   } catch (e) {
@@ -284,7 +389,7 @@ function addLog(msg) {
 function notify(title, body) {
   addLog(`<strong>${title}</strong> — ${body}`);
   if (Notification.permission === "granted") {
-    new Notification(title, { body, icon: "📈" });
+    new Notification(title, { body });
   }
 }
 
@@ -305,8 +410,8 @@ async function checkPrices() {
         notifiedToday[key] = true;
         const name = meta.shortName || symbol;
         notify(
-          `${name} ${changePct >= 0 ? "급등 📈" : "급락 📉"}`,
-          `전일 대비 ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% (${fmtPrice(price, meta.currency)})`
+          `${name} ${changePct >= 0 ? "📈" : "📉"} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(1)}%`,
+          fmtPrice(price, meta.currency)
         );
       }
     } catch { /* 개별 종목 오류는 무시하고 계속 */ }
@@ -347,7 +452,7 @@ $("check-now-btn").onclick = checkPrices;
 $("check-interval").addEventListener("change", () => { if (watchTimer) startWatching(); });
 
 $("log").innerHTML = '<li class="empty">아직 알림이 없습니다</li>';
-if (Notification.permission === "granted") {
+if ("Notification" in window && Notification.permission === "granted") {
   $("notify-btn").textContent = "🔔 알림 켜짐";
   $("notify-btn").classList.add("on");
   startWatching();
