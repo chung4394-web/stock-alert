@@ -111,6 +111,55 @@ button.on { background: var(--green); border: none; color: #06281a; font-weight:
 }
 .hint-small { margin-top: 8px; color: var(--muted); font-size: 0.78rem; }
 
+.strategy-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.strategy-label { color: var(--muted); font-size: 0.9rem; font-weight: 700; }
+.strategy-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.strategy-tabs button {
+  padding: 8px 14px;
+  font-size: 0.88rem;
+  border-radius: 999px;
+}
+.strategy-tabs button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 700;
+}
+.strategy-desc { color: var(--muted); font-size: 0.82rem; }
+
+.rec {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--card-border);
+}
+.rec-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  font-size: 0.98rem;
+}
+.rec-head .grade-buy { color: var(--up); }
+.rec-head .grade-hold { color: var(--muted); }
+.rec-head .grade-avoid { color: var(--down); }
+.rec ul { margin: 8px 0 0 2px; list-style: none; }
+.rec li {
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding-left: 12px;
+  position: relative;
+  margin-top: 3px;
+}
+.rec li::before { content: "·"; position: absolute; left: 2px; }
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

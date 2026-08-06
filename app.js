@@ -16,6 +16,20 @@ let notifiedToday = {}; // { "심볼|날짜|방향": true } 중복 알림 방지
 let supplyCache = {};   // { 심볼: 일봉 수급 점수 } — 장중 신호 강도 판단에 사용
 let tgConfig = JSON.parse(localStorage.getItem(TG_KEY) || "null");
 
+/* ─────────── 투자 전략 ───────────
+ * 전략마다 예측 시간축(horizon)이 다르므로 모델도 전략별로 다시 학습한다.
+ * 수급 원칙("상승은 수급이 따라올 때 붙는다")은 모든 전략의 공통 필터.
+ */
+const STRAT_KEY = "stockAlert.strategy";
+const STRATEGIES = {
+  danta:    { name: "단타",     horizon: 1,  desc: "당일 분봉 모멘텀 — 장중에만 판단" },
+  jongga:   { name: "종가배팅", horizon: 1,  desc: "오늘 종가 매수 → 다음날 매도" },
+  swing:    { name: "스윙",     horizon: 5,  desc: "며칠~몇 주 보유, 5일 후 예측" },
+  longterm: { name: "중장기",   horizon: 20, desc: "몇 주~몇 달 보유, 20일 후 예측" },
+};
+let strategy = localStorage.getItem(STRAT_KEY) || "swing";
+if (!STRATEGIES[strategy]) strategy = "swing";
+
 /* ─────────── 데이터 ─────────── */
 
 async function fetchChart(symbol, range, interval) {
@@ -131,8 +145,8 @@ function supplyScore(obvSlope, mfi, udRatio) {
 
 /* ─────────── 데이터셋 생성 ─────────── */
 
-// 각 날짜별 특징 벡터(기술 지표 + 수급 지표) + 라벨(다음날 상승=1)
-function buildDataset(close, volume, high, low) {
+// 각 날짜별 특징 벡터(기술 지표 + 수급 지표) + 라벨(horizon일 후 상승=1)
+function buildDataset(close, volume, high, low, horizon = 1) {
   const n = close.length;
   const ret1 = close.map((c, i) => (i > 0 ? c / close[i - 1] - 1 : null));
   const rsi = computeRSI(close);
@@ -176,7 +190,7 @@ function buildDataset(close, volume, high, low) {
       Math.log(udRatio),
     ];
     if (feat.some((v) => v === null || !isFinite(v))) continue;
-    const label = i + 1 < n ? (close[i + 1] > close[i] ? 1 : 0) : null;
+    const label = i + horizon < n ? (close[i + horizon] > close[i] ? 1 : 0) : null;
     rows.push({ feat, label, idx: i, obvSlope, mfi: mfi[i] ?? 50, udRatio });
   }
   return rows;
@@ -293,8 +307,8 @@ function detectIntradaySupply(result) {
 }
 
 // 전체 파이프라인: 학습 → 백테스트 → 최신 데이터 예측 + 수급 판단
-function analyze(close, volume, high, low) {
-  const rows = buildDataset(close, volume, high, low);
+function analyze(close, volume, high, low, horizon = 1) {
+  const rows = buildDataset(close, volume, high, low, horizon);
   const labeled = rows.filter((r) => r.label !== null);
   if (labeled.length < 150) throw new Error("데이터가 부족합니다");
 
@@ -322,6 +336,96 @@ function analyze(close, volume, high, low) {
   const verdict = makeVerdict(probUp, supply);
 
   return { probUp, accuracy, baseline, supply, verdict };
+}
+
+/* ─────────── 전략별 맞춤 추천 ───────────
+ * 각 전략이 실제로 보는 지표로 점수를 매겨 매수 우위/관망/회피를 판단.
+ * 수급 이탈(40점 이하)이면 어떤 전략이든 감점 — 공통 원칙.
+ */
+
+// 추천 판단에 쓰는 카드 단위 지표 모음
+function computeCardMetrics(close, volume, high, low) {
+  const n = close.length;
+  const last = n - 1;
+  const avg = (arr, k) => arr.slice(-k).reduce((s, v) => s + v, 0) / k;
+  const rsiArr = computeRSI(close);
+  const dayRange = high[last] - low[last];
+  return {
+    rsi: rsiArr[last] ?? 50,
+    ma5: avg(close, 5),
+    ma20: avg(close, 20),
+    ma60: avg(close, 60),
+    ma60Prev: close.slice(-80, -20).slice(-60).reduce((s, v) => s + v, 0) / 60, // 20일 전의 60일선
+    closePos: dayRange > 0 ? (close[last] - low[last]) / dayRange : 0.5, // 당일 종가 위치 (0=저가, 1=고가)
+    volRatio: volume[last] / (avg(volume, 20) || 1),
+    ret5: close[last] / close[last - 5] - 1,
+    ret20: close[last] / close[last - 20] - 1,
+  };
+}
+
+// d: { probUp, supply, m(카드 지표), intraday(단타 전용) }
+function recommendForStrategy(key, d) {
+  const reasons = [];
+  let score = 0;
+  const { supply, m } = d;
+  const probPct = Math.round(d.probUp * 100);
+
+  // 공통: 수급 필터
+  if (supply.score >= 60) { score += 1; reasons.push(`수급 유입 (${supply.score}점)`); }
+  else if (supply.score <= 40) { score -= 2; reasons.push(`수급 이탈 (${supply.score}점) — 모든 전략에서 감점`); }
+
+  if (key === "danta") {
+    if (!d.intraday) {
+      return { grade: "hold", label: "판단 보류", reasons: ["장이 열려 있을 때만 분봉 데이터로 판단할 수 있습니다", "장중에 '지금 확인'을 눌러보세요"] };
+    }
+    if (d.intraday.supplySignal) { score += 2; reasons.push(`장중 수급 유입: ${d.intraday.supplySignal.reason}`); }
+    if (d.intraday.mom30m > 0.003) { score += 1; reasons.push(`최근 30분 상승 모멘텀 (+${(d.intraday.mom30m * 100).toFixed(2)}%)`); }
+    else if (d.intraday.mom30m < -0.003) { score -= 1; reasons.push(`최근 30분 하락 모멘텀 (${(d.intraday.mom30m * 100).toFixed(2)}%)`); }
+    if (!d.intraday.supplySignal && Math.abs(d.intraday.mom30m) <= 0.003) reasons.push("장중 뚜렷한 모멘텀 없음");
+  } else if (key === "jongga") {
+    if (m.closePos >= 0.7) { score += 1; reasons.push("고가 근처 마감 — 강한 종가"); }
+    else if (m.closePos <= 0.3) { score -= 1; reasons.push("저가 근처 마감 — 약한 종가"); }
+    if (m.volRatio >= 1.3) { score += 1; reasons.push(`거래량 평소의 ${m.volRatio.toFixed(1)}배`); }
+    if (d.probUp >= 0.55) { score += 1; reasons.push(`모델 다음날 상승확률 ${probPct}%`); }
+    else if (d.probUp < 0.45) { score -= 1; reasons.push(`모델 다음날 상승확률 ${probPct}% (낮음)`); }
+  } else if (key === "swing") {
+    if (m.ma20 > m.ma60) { score += 1; reasons.push("중기 추세 상승 (20일선 > 60일선)"); }
+    else { score -= 1; reasons.push("중기 추세 하락 (20일선 < 60일선)"); }
+    if (m.rsi >= 40 && m.rsi <= 62) { score += 1; reasons.push(`RSI ${Math.round(m.rsi)} — 과열 아님`); }
+    else if (m.rsi > 72) { score -= 1; reasons.push(`RSI ${Math.round(m.rsi)} — 단기 과열`); }
+    if (d.probUp >= 0.55) { score += 1; reasons.push(`모델 5일 후 상승확률 ${probPct}%`); }
+    else if (d.probUp < 0.45) { score -= 1; reasons.push(`모델 5일 후 상승확률 ${probPct}% (낮음)`); }
+  } else if (key === "longterm") {
+    if (m.ma60 > m.ma60Prev) { score += 1; reasons.push("장기 추세 상승 (60일선 우상향)"); }
+    else { score -= 1; reasons.push("장기 추세 하락 (60일선 우하향)"); }
+    if (m.ret20 > 0) { score += 1; reasons.push(`최근 1개월 +${(m.ret20 * 100).toFixed(1)}%`); }
+    if (d.probUp >= 0.55) { score += 1; reasons.push(`모델 20일 후 상승확률 ${probPct}%`); }
+    else if (d.probUp < 0.45) { score -= 1; reasons.push(`모델 20일 후 상승확률 ${probPct}% (낮음)`); }
+  }
+
+  if (score >= 2) return { grade: "buy", label: "🟢 매수 우위", reasons };
+  if (score <= -2) return { grade: "avoid", label: "🔴 회피·매도 우위", reasons };
+  return { grade: "hold", label: "⚪ 관망", reasons };
+}
+
+// 단타 전략용: 장중 분봉 지표 (장이 닫혀 있으면 null)
+async function fetchIntradayMetrics(symbol) {
+  try {
+    const result = await fetchChart(symbol, "1d", "5m");
+    const ts = result.timestamp;
+    const q = result.indicators?.quote?.[0];
+    if (!ts || !q) return null;
+    const bars = [];
+    for (let i = 0; i < ts.length; i++) {
+      if (q.close[i] != null && q.volume[i] != null && q.volume[i] > 0)
+        bars.push({ t: ts[i], c: q.close[i], v: q.volume[i] });
+    }
+    if (bars.length < 7) return null;
+    const lastBar = bars[bars.length - 1];
+    if (Date.now() / 1000 - lastBar.t > 15 * 60) return null; // 장 마감
+    const mom30m = lastBar.c / bars[bars.length - 7].c - 1;
+    return { mom30m, supplySignal: detectIntradaySupply(result) };
+  } catch { return null; }
 }
 
 /* ─────────── UI: 예측 카드 ─────────── */
@@ -365,8 +469,12 @@ async function renderCard(symbol) {
       }
     });
 
-    const { probUp, accuracy, supply, verdict } = analyze(close, volume, high, low);
+    const strat = STRATEGIES[strategy];
+    const { probUp, accuracy, supply, verdict } = analyze(close, volume, high, low, strat.horizon);
     supplyCache[symbol] = supply.score;
+    const m = computeCardMetrics(close, volume, high, low);
+    const intraday = strategy === "danta" ? await fetchIntradayMetrics(symbol) : null;
+    const rec = recommendForStrategy(strategy, { probUp, supply, m, intraday });
     const price = meta.regularMarketPrice ?? close[close.length - 1];
     // chartPreviousClose는 차트 범위(2년) 시작 전 종가라서 쓰면 안 됨 — 전일 종가 사용
     const prevClose = meta.regularMarketPreviousClose ?? close[close.length - 2];
@@ -393,11 +501,18 @@ async function renderCard(symbol) {
           MFI ${Math.round(supply.mfiComp * 100)} ·
           상승일 거래량 ${supply.udComp >= 0.5 ? "우위" : "열세"}</div>
       </div>
+      <div class="rec">
+        <div class="rec-head">
+          <span>${strat.name} 추천</span>
+          <span class="grade-${rec.grade}">${rec.label}</span>
+        </div>
+        <ul>${rec.reasons.map((r) => `<li>${r}</li>`).join("")}</ul>
+      </div>
       <div class="pred">
         <div class="dir ${verdict.dir}">${verdict.text}</div>
         <div class="meta reason">${verdict.reason}</div>
         <div class="prob-bar"><div style="width:${(probUp * 100).toFixed(0)}%"></div></div>
-        <div class="meta">모델 상승확률 ${(probUp * 100).toFixed(0)}% · 정확도 ${(accuracy * 100).toFixed(0)}%</div>
+        <div class="meta">모델 ${strat.horizon}일 후 상승확률 ${(probUp * 100).toFixed(0)}% · 정확도 ${(accuracy * 100).toFixed(0)}%</div>
       </div>`;
     card.querySelector(".remove").onclick = () => removeSymbol(symbol);
   } catch (e) {
@@ -554,6 +669,25 @@ if (tgConfig) {
   $("tg-token").value = tgConfig.token;
   $("tg-chat").value = tgConfig.chatId;
 }
+
+// 전략 탭 렌더링
+function renderStrategyTabs() {
+  $("strategy-tabs").innerHTML = "";
+  for (const [key, s] of Object.entries(STRATEGIES)) {
+    const btn = document.createElement("button");
+    btn.textContent = s.name;
+    btn.className = key === strategy ? "active" : "";
+    btn.onclick = () => {
+      strategy = key;
+      localStorage.setItem(STRAT_KEY, key);
+      renderStrategyTabs();
+      renderAll();
+    };
+    $("strategy-tabs").appendChild(btn);
+  }
+  $("strategy-desc").textContent = STRATEGIES[strategy].desc;
+}
+renderStrategyTabs();
 
 $("log").innerHTML = '<li class="empty">아직 알림이 없습니다</li>';
 if ("Notification" in window && Notification.permission === "granted") {
