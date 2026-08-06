@@ -92,6 +92,25 @@ button.on { background: var(--green); border: none; color: #06281a; font-weight:
 }
 .status { margin-top: 12px; color: var(--muted); font-size: 0.88rem; }
 
+.tg-settings { margin-top: 14px; }
+.tg-settings summary {
+  color: var(--muted);
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.tg-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.tg-row input {
+  flex: 1;
+  min-width: 180px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.88rem;
+}
+.hint-small { margin-top: 8px; color: var(--muted); font-size: 0.78rem; }
+
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

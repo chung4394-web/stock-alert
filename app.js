@@ -8,10 +8,13 @@
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "stockAlert.watchlist";
+const TG_KEY = "stockAlert.telegram";
 
 let watchlist = JSON.parse(localStorage.getItem(STORAGE_KEY) || '["005930.KS"]');
 let watchTimer = null;
 let notifiedToday = {}; // { "심볼|날짜|방향": true } 중복 알림 방지
+let supplyCache = {};   // { 심볼: 일봉 수급 점수 } — 장중 신호 강도 판단에 사용
+let tgConfig = JSON.parse(localStorage.getItem(TG_KEY) || "null");
 
 /* ─────────── 데이터 ─────────── */
 
@@ -240,6 +243,55 @@ function makeVerdict(probUp, supply) {
     : { dir: "down", text: "📉 하락", reason: "모델 하락 신호, 수급 중립" };
 }
 
+/* ─────────── 장중 수급 유입 감지 (5분봉) ───────────
+ * "수급이 붙기 시작"하는 순간을 잡는 두 가지 신호:
+ *  1) 거래량 급증: 최근 3개 봉(15분) 평균 거래량이 당일 평균의 2.5배 이상 + 가격 상승 동반
+ *  2) 장중 OBV 전환: 당일 최저 수준까지 빠졌던 OBV가 최근 30분간 뚜렷하게 상승
+ * 장 초반(1시간 미만)이거나 장이 닫혀 있으면(마지막 봉이 15분 이상 과거) 판단 보류
+ */
+function detectIntradaySupply(result) {
+  const ts = result.timestamp;
+  const q = result.indicators?.quote?.[0];
+  if (!ts || !q) return null;
+
+  const bars = [];
+  for (let i = 0; i < ts.length; i++) {
+    if (q.close[i] != null && q.volume[i] != null && q.volume[i] > 0)
+      bars.push({ t: ts[i], c: q.close[i], v: q.volume[i] });
+  }
+  if (bars.length < 12) return null;
+
+  const last = bars[bars.length - 1];
+  if (Date.now() / 1000 - last.t > 15 * 60) return null; // 장중이 아님
+
+  const avgVol = bars.reduce((s, b) => s + b.v, 0) / bars.length;
+  if (avgVol <= 0) return null;
+
+  // 신호 1: 거래량 급증 + 가격 상승
+  const recent = bars.slice(-3);
+  const recentAvgVol = recent.reduce((s, b) => s + b.v, 0) / recent.length;
+  const priceRising = last.c > bars[bars.length - 4].c;
+  if (recentAvgVol >= 2.5 * avgVol && priceRising) {
+    return { reason: `거래량 급증 (평소의 ${(recentAvgVol / avgVol).toFixed(1)}배) + 가격 상승 동반` };
+  }
+
+  // 신호 2: 장중 OBV 상승 전환
+  let acc = 0;
+  const obvSeries = bars.map((b, i) => {
+    if (i > 0) acc += b.c > bars[i - 1].c ? b.v : b.c < bars[i - 1].c ? -b.v : 0;
+    return acc;
+  });
+  const n = obvSeries.length;
+  const nowObv = obvSeries[n - 1];
+  const obv30mAgo = obvSeries[n - 7];
+  const dayMinBefore = Math.min(...obvSeries.slice(0, n - 6));
+  if (obv30mAgo <= dayMinBefore && nowObv > obv30mAgo + 2 * avgVol) {
+    return { reason: "장중 OBV 상승 전환 — 매수 우위로 돌아섬" };
+  }
+
+  return null;
+}
+
 // 전체 파이프라인: 학습 → 백테스트 → 최신 데이터 예측 + 수급 판단
 function analyze(close, volume, high, low) {
   const rows = buildDataset(close, volume, high, low);
@@ -314,6 +366,7 @@ async function renderCard(symbol) {
     });
 
     const { probUp, accuracy, supply, verdict } = analyze(close, volume, high, low);
+    supplyCache[symbol] = supply.score;
     const price = meta.regularMarketPrice ?? close[close.length - 1];
     // chartPreviousClose는 차트 범위(2년) 시작 전 종가라서 쓰면 안 됨 — 전일 종가 사용
     const prevClose = meta.regularMarketPreviousClose ?? close[close.length - 2];
@@ -392,6 +445,34 @@ function notify(title, body) {
   if (Notification.permission === "granted") {
     new Notification(title, { body });
   }
+  sendTelegram(`${title}\n${body}`);
+}
+
+// 텔레그램 설정이 있으면 서버리스 함수를 통해 전송 (실패해도 앱은 계속)
+async function sendTelegram(text) {
+  if (!tgConfig?.token || !tgConfig?.chatId) return;
+  try {
+    await fetch("/api/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: tgConfig.token, chatId: tgConfig.chatId, text }),
+    });
+  } catch { /* 네트워크 오류 무시 */ }
+}
+
+function saveTelegramConfig() {
+  const token = $("tg-token").value.trim();
+  const chatId = $("tg-chat").value.trim();
+  if (!token || !chatId) {
+    tgConfig = null;
+    localStorage.removeItem(TG_KEY);
+    addLog("텔레그램 알림이 해제되었습니다");
+    return;
+  }
+  tgConfig = { token, chatId };
+  localStorage.setItem(TG_KEY, JSON.stringify(tgConfig));
+  addLog("텔레그램 설정 저장됨 — 테스트 메시지를 보냈습니다");
+  sendTelegram("✅ 주식 알리미 텔레그램 연결 완료");
 }
 
 async function checkPrices() {
@@ -405,15 +486,32 @@ async function checkPrices() {
       const prev = meta.regularMarketPreviousClose ?? meta.chartPreviousClose;
       if (!price || !prev) continue;
       const changePct = ((price - prev) / prev) * 100;
+      const name = meta.shortName || symbol;
+
+      // 1) 급등락 알림 (변동률 기준)
       const dir = changePct >= 0 ? "up" : "down";
       const key = `${symbol}|${today}|${dir}`;
       if (Math.abs(changePct) >= threshold && !notifiedToday[key]) {
         notifiedToday[key] = true;
-        const name = meta.shortName || symbol;
         notify(
           `${name} ${changePct >= 0 ? "📈" : "📉"} ${changePct >= 0 ? "+" : ""}${changePct.toFixed(1)}%`,
           fmtPrice(price, meta.currency)
         );
+      }
+
+      // 2) 장중 수급 유입 감지 (하루 1회)
+      const sKey = `${symbol}|${today}|supply`;
+      if (!notifiedToday[sKey]) {
+        const sig = detectIntradaySupply(result);
+        if (sig) {
+          notifiedToday[sKey] = true;
+          const dailyScore = supplyCache[symbol];
+          const backed = dailyScore != null && dailyScore >= 55 ? " · 최근 매집 흐름과 일치 🔥" : "";
+          notify(
+            `${name} 💧 수급 유입 감지`,
+            `${sig.reason}${backed} (현재 ${fmtPrice(price, meta.currency)}, ${changePct >= 0 ? "+" : ""}${changePct.toFixed(1)}%)`
+          );
+        }
       }
     } catch { /* 개별 종목 오류는 무시하고 계속 */ }
   }
@@ -451,6 +549,11 @@ $("symbol-input").addEventListener("keydown", (e) => { if (e.key === "Enter") ad
 $("notify-btn").onclick = enableNotifications;
 $("check-now-btn").onclick = checkPrices;
 $("check-interval").addEventListener("change", () => { if (watchTimer) startWatching(); });
+$("tg-save-btn").onclick = saveTelegramConfig;
+if (tgConfig) {
+  $("tg-token").value = tgConfig.token;
+  $("tg-chat").value = tgConfig.chatId;
+}
 
 $("log").innerHTML = '<li class="empty">아직 알림이 없습니다</li>';
 if ("Notification" in window && Notification.permission === "granted") {
