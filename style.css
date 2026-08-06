@@ -1,0 +1,170 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0f1420;
+  --card: #1a2233;
+  --card-border: #2a3550;
+  --text: #e8ecf4;
+  --muted: #8b96ab;
+  --accent: #4f8cff;
+  --up: #ff5d5d;
+  --down: #4f8cff;
+  --green: #35c77b;
+}
+
+body {
+  font-family: "Apple SD Gothic Neo", "Pretendard", -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  text-align: center;
+  padding: 40px 20px 24px;
+}
+header h1 { font-size: 1.7rem; }
+header .sub { color: var(--muted); margin-top: 8px; font-size: 0.95rem; }
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 20px 40px;
+}
+
+.controls {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.add-row { display: flex; gap: 10px; margin-bottom: 14px; }
+.add-row input {
+  flex: 1;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--card-border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+}
+.add-row input:focus { outline: 2px solid var(--accent); }
+
+button {
+  padding: 12px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+button:hover { background: #232e47; }
+button.primary { background: var(--accent); border: none; font-weight: 700; }
+button.primary:hover { background: #3a77e8; }
+button.on { background: var(--green); border: none; color: #06281a; font-weight: 700; }
+
+.settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.settings-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.settings-row select {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--bg);
+  color: var(--text);
+}
+.status { margin-top: 12px; color: var(--muted); font-size: 0.88rem; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 20px;
+  position: relative;
+}
+.card .remove {
+  position: absolute;
+  top: 12px; right: 12px;
+  background: none; border: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  padding: 4px 8px;
+}
+.card .remove:hover { color: var(--up); }
+.card h3 { font-size: 1.1rem; margin-bottom: 2px; }
+.card .symbol { color: var(--muted); font-size: 0.82rem; margin-bottom: 12px; }
+.card .price { font-size: 1.5rem; font-weight: 800; }
+.card .change { font-size: 0.95rem; font-weight: 600; margin-left: 6px; }
+.card .change.up { color: var(--up); }
+.card .change.down { color: var(--down); }
+
+.pred {
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--bg);
+}
+.pred .dir { font-size: 1.05rem; font-weight: 700; }
+.pred .dir.up { color: var(--up); }
+.pred .dir.down { color: var(--down); }
+.prob-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: #2a3550;
+  margin: 10px 0 6px;
+  overflow: hidden;
+}
+.prob-bar > div { height: 100%; background: var(--up); border-radius: 4px; }
+.pred .meta { color: var(--muted); font-size: 0.8rem; }
+.card.loading .pred { opacity: 0.5; }
+
+.log-section { margin-top: 32px; }
+.log-section h2 { font-size: 1.05rem; margin-bottom: 12px; color: var(--muted); }
+#log { list-style: none; }
+#log li {
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--card);
+  border-radius: 0 8px 8px 0;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+}
+#log li time { color: var(--muted); margin-right: 8px; font-size: 0.8rem; }
+#log .empty { border-left-color: var(--card-border); color: var(--muted); }
+
+footer {
+  text-align: center;
+  padding: 24px 20px 36px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  border-top: 1px solid var(--card-border);
+}
+footer .hint { margin-top: 8px; }
+
+@media (max-width: 600px) {
+  .settings-row { flex-direction: column; align-items: stretch; }
+  .settings-row label { justify-content: space-between; }
+}

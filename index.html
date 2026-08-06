@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>주식 AI 상승하락 알리미</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>📈 주식 AI 상승하락 알리미</h1>
+    <p class="sub">AI가 다음 거래일 상승/하락을 예측하고, 장중 급등락 시 브라우저 알림을 보냅니다</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div class="add-row">
+        <input id="symbol-input" type="text" placeholder="종목코드 입력 (예: 005930.KS, AAPL)" />
+        <button id="add-btn" class="primary">+ 추가</button>
+      </div>
+      <div class="settings-row">
+        <label>
+          알림 기준 변동률
+          <select id="threshold">
+            <option value="1">±1%</option>
+            <option value="2" selected>±2%</option>
+            <option value="3">±3%</option>
+            <option value="5">±5%</option>
+          </select>
+        </label>
+        <label>
+          감시 주기
+          <select id="check-interval">
+            <option value="1">1분</option>
+            <option value="5" selected>5분</option>
+            <option value="10">10분</option>
+          </select>
+        </label>
+        <button id="notify-btn">🔔 알림 켜기</button>
+        <button id="check-now-btn">지금 확인</button>
+      </div>
+      <p id="watch-status" class="status"></p>
+    </section>
+
+    <section id="cards" class="cards"></section>
+
+    <section class="log-section">
+      <h2>알림 기록</h2>
+      <ul id="log"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>⚠️ 본 서비스는 학습/연구용이며 투자 조언이 아닙니다. 예측 정확도는 동전 던지기 수준일 수 있으며, 실제 투자 판단에 사용하지 마세요.</p>
+    <p class="hint">💡 알림은 이 페이지가 열려 있는 동안에만 작동합니다. 한국 주식은 종목코드 + .KS(코스피)/.KQ(코스닥), 미국 주식은 티커 그대로 입력하세요.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
