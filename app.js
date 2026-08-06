@@ -315,7 +315,8 @@ async function renderCard(symbol) {
 
     const { probUp, accuracy, supply, verdict } = analyze(close, volume, high, low);
     const price = meta.regularMarketPrice ?? close[close.length - 1];
-    const prevClose = meta.chartPreviousClose ?? close[close.length - 2];
+    // chartPreviousClose는 차트 범위(2년) 시작 전 종가라서 쓰면 안 됨 — 전일 종가 사용
+    const prevClose = meta.regularMarketPreviousClose ?? close[close.length - 2];
     const changePct = ((price - prevClose) / prevClose) * 100;
 
     card.className = "card";
@@ -401,7 +402,7 @@ async function checkPrices() {
       const result = await fetchChart(symbol, "1d", "5m");
       const meta = result.meta;
       const price = meta.regularMarketPrice;
-      const prev = meta.chartPreviousClose;
+      const prev = meta.regularMarketPreviousClose ?? meta.chartPreviousClose;
       if (!price || !prev) continue;
       const changePct = ((price - prev) / prev) * 100;
       const dir = changePct >= 0 ? "up" : "down";
